@@ -1,5 +1,2 @@
 # AutoTrade
 
-Szia
-
-Szia szia
