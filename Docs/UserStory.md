@@ -3,20 +3,18 @@
 
 ## Vevő jogosultság
 
-- Vevő belép
-- Vevő kiválaszt egy autót.
-- Látja a termék adatait.
-- Ad egy ajánlatot.
-- Elfogadja/visszautasítja az ajánlatot.
+- Felhasználó belép.
+- Felhasználó kiválaszt egy autót & látja a termék adatait.
+- Felhasználó megveszi az autót.
 
 
 
 ## Eladó jogosultság
  
- - Eladó belép.
-- Eladó feltölti az autót.
-- Elfogadja a vevő által adott ajánlatot.
-- Elutasítja a vevő által adott ajánlatot.
+- Felhasználó belép.
+- Felhasználó feltölti az autót.
+- Felhasználó eladja az autót.
+- Felhasználó modósithatja a saját hirdetését.
 
 ## Adminisztrátor jogosultság
 
@@ -25,6 +23,15 @@
 - Adminisztrátor törölhet egy vevőt.
 - Adminisztrátor törölhet egy eladót.
 - Adminisztrátor feltölthet egy autót.
-- Adminisztrátor elfogadhat egy ajánlatot.
-- Adminisztrátor elutasíthat egy ajánlatot.
-- Adminisztrátor törölhet egy adminisztrátort.
+- Adminisztrátor vehet autót.
+- Adminisztrátor törölhet egy adminisztrátort (Kivéve magát).
+- Adminisztrátor lekérdezhet egy autót.
+- Adminisztrátor lekérdezhet egy vevőt.
+- Adminisztrátor lekérdezhet egy eladót.
+- Adminisztrátor lekérdezhet egy adminisztrátort.
+- Adminisztrátor modósithat egy autót.
+- Adminisztrátor modósithat egy vevőt.
+- Adminisztrátor modósithat egy eladót.
+- Adminisztrátor modósithat egy adminisztrátort.
+- Adminisztrátor modósithat egy autót.
+- Adminisztrátor lekérdezheti az éves bevételt.
