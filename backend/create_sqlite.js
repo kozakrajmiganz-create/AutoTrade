@@ -5,8 +5,10 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const dbDir = path.join(__dirname, 'vue-project', 'public');
+const dbDir = __dirname;
 const dbPath = path.join(dbDir, 'database.sqlite');
+const frontendPublicDir = path.join(__dirname, '..', 'frontend', 'public');
+const frontendDbPath = path.join(frontendPublicDir, 'database.sqlite');
 
 const cars = [
   {
@@ -301,8 +303,59 @@ const dealers = [
 async function main() {
   const { DatabaseSync } = await import('node:sqlite');
 
+  if (!fs.existsSync(dbDir)) {
+    fs.mkdirSync(dbDir, { recursive: true });
+  }
+
   if (fs.existsSync(dbPath)) {
     fs.unlinkSync(dbPath);
+  }
+
+  let carsData = cars;
+  let categoriesData = categories;
+  let dealersData = dealers;
+
+  const jsonPath = path.join(dbDir, 'database.json');
+  if (fs.existsSync(jsonPath)) {
+    try {
+      const raw = fs.readFileSync(jsonPath, 'utf8');
+      const data = JSON.parse(raw);
+      if (Array.isArray(data.cars) && data.cars.length > 0) {
+        carsData = data.cars.map((c) => {
+          const seller = c.seller || {};
+          return {
+            id: c.id,
+            brand: c.brand,
+            model: c.model,
+            year: c.year,
+            price: c.price,
+            mileage: c.mileage,
+            fuel: c.fuel,
+            transmission: c.transmission,
+            power: c.power,
+            engine_size: c.engine_size ?? c.engineSize ?? null,
+            category: c.category,
+            color: c.color,
+            condition: c.condition,
+            description: c.description ?? '',
+            image: c.image ?? '',
+            featured: c.featured ? 1 : 0,
+            seller_name: c.seller_name ?? seller.name ?? '',
+            seller_city: c.seller_city ?? seller.city ?? '',
+            seller_phone: c.seller_phone ?? seller.phone ?? ''
+          };
+        });
+      }
+      if (Array.isArray(data.categories) && data.categories.length > 0) {
+        categoriesData = data.categories;
+      }
+      if (Array.isArray(data.dealers) && data.dealers.length > 0) {
+        dealersData = data.dealers;
+      }
+      console.log(`Loaded data from: ${jsonPath}`);
+    } catch (err) {
+      console.warn('Could not parse database.json, using default dataset:', err.message);
+    }
   }
 
   const db = new DatabaseSync(dbPath);
@@ -343,6 +396,23 @@ async function main() {
       phone TEXT NOT NULL,
       email TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      email TEXT NOT NULL UNIQUE,
+      role TEXT NOT NULL DEFAULT 'vevo'
+    );
+
+    CREATE TABLE IF NOT EXISTS purchases (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      car_id INTEGER NOT NULL,
+      car_title TEXT NOT NULL,
+      buyer_name TEXT NOT NULL,
+      buyer_email TEXT NOT NULL,
+      price INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   const insertCar = db.prepare(`
@@ -353,7 +423,7 @@ async function main() {
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
-  for (const car of cars) {
+  for (const car of carsData) {
     insertCar.run(
       car.id,
       car.brand,
@@ -378,7 +448,7 @@ async function main() {
   }
 
   const insertCat = db.prepare('INSERT INTO categories (id, name) VALUES (?, ?)');
-  for (const cat of categories) {
+  for (const cat of categoriesData) {
     insertCat.run(cat.id, cat.name);
   }
 
@@ -386,12 +456,37 @@ async function main() {
     INSERT INTO dealers (id, name, city, address, phone, email)
     VALUES (?, ?, ?, ?, ?, ?)
   `);
-  for (const dealer of dealers) {
+  for (const dealer of dealersData) {
     insertDealer.run(dealer.id, dealer.name, dealer.city, dealer.address, dealer.phone, dealer.email);
   }
 
+  const insertUser = db.prepare(`
+    INSERT INTO users (id, name, email, role)
+    VALUES (?, ?, ?, ?)
+  `);
+  const initialUsers = [
+    { id: 1, name: "Admin Felhasználó", email: "admin@autotrade.hu", role: "admin" },
+    { id: 2, name: "Kovács Eladó", email: "elado@autotrade.hu", role: "elado" },
+    { id: 3, name: "Nagy Vevő", email: "vevo@autotrade.hu", role: "vevo" }
+  ];
+  for (const user of initialUsers) {
+    insertUser.run(user.id, user.name, user.email, user.role);
+  }
+
+  const insertPurchase = db.prepare(`
+    INSERT INTO purchases (car_id, car_title, buyer_name, buyer_email, price, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
+  insertPurchase.run(1, "BMW 320d Touring xDrive", "Nagy Vevő", "vevo@autotrade.hu", 6890000, "2026-01-15 10:30:00");
+  insertPurchase.run(3, "Volkswagen Golf VII 1.5 TSI", "Kiss Péter", "kiss@example.com", 4690000, "2026-02-20 14:15:00");
+
   db.close();
   console.log(`Populated and created SQLite database at: ${dbPath}`);
+
+  if (fs.existsSync(frontendPublicDir)) {
+    fs.copyFileSync(dbPath, frontendDbPath);
+    console.log(`Synced SQLite database to frontend: ${frontendDbPath}`);
+  }
 }
 
 main().catch(console.error);
