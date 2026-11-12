@@ -1,7 +1,7 @@
 # Felhasználói Történetek (User Stories)
 
 ## Közös
-
+- A felhasználó regisztrál a rendszerbe.
 - A felhasználó bejelentkezik a rendszerbe.
 
 ## Felhasználó jogosultság (Vevő / Eladó)
