@@ -16,6 +16,7 @@ if (!fs.existsSync(dbPath)) {
 }
 
 const db = new DatabaseSync(dbPath);
+db.exec('PRAGMA foreign_keys = ON;');
 
 function sendJson(res, statusCode, data) {
   res.writeHead(statusCode, {
@@ -43,6 +44,15 @@ function parseBody(req) {
   });
 }
 
+// Helper lookup or create ID in normalized tables
+function getOrCreateId(table, name, col = 'nev') {
+  if (!name) return 1;
+  const existing = db.prepare(`SELECT id FROM ${table} WHERE ${col} = ?`).get(name);
+  if (existing) return existing.id;
+  const insert = db.prepare(`INSERT INTO ${table} (${col}) VALUES (?)`).run(name);
+  return Number(insert.lastInsertRowid);
+}
+
 const server = http.createServer(async (req, res) => {
   // CORS Preflight
   if (req.method === 'OPTIONS') {
@@ -58,6 +68,23 @@ const server = http.createServer(async (req, res) => {
   const pathname = url.pathname;
 
   try {
+    // -------------------------------------------------------------
+    // 0. SCHEMA / TÁBLA LISTA & INFORMÁCIÓK
+    // -------------------------------------------------------------
+    if (req.method === 'GET' && pathname === '/api/schema') {
+      const tables = [
+        'marka', 'modell', 'kategoria', 'uzemanyag', 'valto', 'szin', 'allapot',
+        'telepules', 'kereskedes', 'szerepkor', 'felhasznalo', 'vevo', 'auto',
+        'vasarlas', 'fizetesmod', 'afakulcs', 'szamlafej', 'szamlatetel'
+      ];
+      const result = tables.map(t => {
+        const count = db.prepare(`SELECT COUNT(*) as count FROM ${t}`).get().count;
+        const columns = db.prepare(`PRAGMA table_info(${t})`).all();
+        return { table: t, rows: count, columns };
+      });
+      return sendJson(res, 200, { tables: result });
+    }
+
     // -------------------------------------------------------------
     // 1. CARS ENDPOINTS (Autók)
     // -------------------------------------------------------------
@@ -118,90 +145,119 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, car);
     }
 
-    // POST /api/cars (Eladó/Admin feltölti az autót)
+    // POST /api/cars (Eladó/Admin feltölti az autót a normalizált táblába)
     if (req.method === 'POST' && pathname === '/api/cars') {
       const body = await parseBody(req);
       const {
         brand, model, year, price, mileage, fuel, transmission,
         power, engine_size, category, color, condition, description,
-        image, seller_name, seller_city, seller_phone
+        image, seller_name, seller_city, seller_phone, alvazszam
       } = body;
 
       if (!brand || !model || !year || !price) {
         return sendJson(res, 400, { error: 'Márka, modell, évjárat és ár megadása kötelező!' });
       }
 
+      // 1. Márka
+      const markaId = getOrCreateId('marka', brand);
+
+      // 2. Modell
+      let modellRow = db.prepare('SELECT id FROM modell WHERE marka_id = ? AND nev = ?').get(markaId, model);
+      let modellId = modellRow ? modellRow.id : null;
+      if (!modellId) {
+        const insModell = db.prepare('INSERT INTO modell (marka_id, nev) VALUES (?, ?)').run(markaId, model);
+        modellId = Number(insModell.lastInsertRowid);
+      }
+
+      // 3. Kategória, Üzemanyag, Váltó, Szín, Állapot
+      const kategoriaId = getOrCreateId('kategoria', category || 'Szedán');
+      const uzemanyagId = getOrCreateId('uzemanyag', fuel || 'Benzin');
+      const valtoId = getOrCreateId('valto', transmission || 'Manuális');
+      const szinId = getOrCreateId('szin', color || 'Fekete');
+      const allapotId = getOrCreateId('allapot', condition || 'Megkímélt');
+
+      // 4. Kereskedés / Település
+      const telepulesId = getOrCreateId('telepules', seller_city || 'Budapest');
+      let kereskedesRow = db.prepare('SELECT id FROM kereskedes WHERE nev = ?').get(seller_name || 'AutoTrade City');
+      let kereskedesId = kereskedesRow ? kereskedesRow.id : 1;
+
+      // Generálunk alvázszámot ha nincs megadva (17 karakter)
+      const generatedVin = alvazszam || ('VIN' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).substring(2, 8).toUpperCase()).padEnd(17, 'X').substring(0, 17);
+
       const stmt = db.prepare(`
-        INSERT INTO cars (
-          brand, model, year, price, mileage, fuel, transmission,
-          power, engine_size, category, color, condition, description,
-          image, featured, seller_name, seller_city, seller_phone
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO auto (
+          alvazszam, modell_id, kategoria_id, uzemanyag_id, valto_id,
+          szin_id, allapot_id, kereskedes_id, evjarat, ar, km_ora,
+          teljesitmeny, hengerurtartalom, leiras, kep, kiemelt
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       const result = stmt.run(
-        brand,
-        model,
+        generatedVin,
+        modellId,
+        kategoriaId,
+        uzemanyagId,
+        valtoId,
+        szinId,
+        allapotId,
+        kereskedesId,
         Number(year),
         Number(price),
         Number(mileage || 0),
-        fuel || 'Benzin',
-        transmission || 'Manuális',
         Number(power || 100),
         Number(engine_size || 1500),
-        category || 'Szedán',
-        color || 'Fekete',
-        condition || 'Megkímélt',
         description || '',
         image || 'https://images.unsplash.com/photo-1552519507-da3b142c6e3d?auto=format&fit=crop&w=1000&q=80',
-        0,
-        seller_name || 'Magánszemély',
-        seller_city || 'Budapest',
-        seller_phone || '+36 30 123 4567'
+        0
       );
 
-      return sendJson(res, 201, { id: result.lastInsertRowid, message: 'Autó sikeresen feltöltve!' });
+      return sendJson(res, 201, {
+        id: Number(result.lastInsertRowid),
+        message: 'Autó sikeresen feltöltve a normalizált adatbázisba!'
+      });
     }
 
     // PUT /api/cars/:id (Eladó/Admin módosítja az autót)
     if (req.method === 'PUT' && carIdMatch) {
       const id = Number(carIdMatch[1]);
       const body = await parseBody(req);
-      const current = db.prepare('SELECT * FROM cars WHERE id = ?').get(id);
+      const current = db.prepare('SELECT * FROM auto WHERE id = ?').get(id);
       if (!current) {
         return sendJson(res, 404, { error: 'Autó nem található' });
       }
 
-      const updated = { ...current, ...body };
       const stmt = db.prepare(`
-        UPDATE cars SET
-          brand = ?, model = ?, year = ?, price = ?, mileage = ?, fuel = ?, transmission = ?,
-          power = ?, engine_size = ?, category = ?, color = ?, condition = ?, description = ?,
-          image = ?, featured = ?, seller_name = ?, seller_city = ?, seller_phone = ?
+        UPDATE auto SET
+          ar = COALESCE(?, ar),
+          km_ora = COALESCE(?, km_ora),
+          leiras = COALESCE(?, leiras),
+          kep = COALESCE(?, kep),
+          kiemelt = COALESCE(?, kiemelt)
         WHERE id = ?
       `);
 
       stmt.run(
-        updated.brand, updated.model, Number(updated.year), Number(updated.price),
-        Number(updated.mileage), updated.fuel, updated.transmission, Number(updated.power),
-        Number(updated.engine_size), updated.category, updated.color, updated.condition,
-        updated.description, updated.image, updated.featured ? 1 : 0, updated.seller_name,
-        updated.seller_city, updated.seller_phone, id
+        body.price ? Number(body.price) : null,
+        body.mileage ? Number(body.mileage) : null,
+        body.description !== undefined ? body.description : null,
+        body.image !== undefined ? body.image : null,
+        body.featured !== undefined ? (body.featured ? 1 : 0) : null,
+        id
       );
 
-      return sendJson(res, 200, { message: 'Autó sikeresen módosítva!', car: { ...updated, id } });
+      return sendJson(res, 200, { message: 'Autó sikeresen módosítva!' });
     }
 
     // DELETE /api/cars/:id (Admin törölhet autót)
     if (req.method === 'DELETE' && carIdMatch) {
       const id = Number(carIdMatch[1]);
-      const stmt = db.prepare('DELETE FROM cars WHERE id = ?');
+      const stmt = db.prepare('DELETE FROM auto WHERE id = ?');
       stmt.run(id);
       return sendJson(res, 200, { message: 'Autó sikeresen törölve' });
     }
 
     // -------------------------------------------------------------
-    // 2. PURCHASES ENDPOINTS (Vásárlások - Vevő)
+    // 2. PURCHASES ENDPOINTS (Vásárlások & Számlázás)
     // -------------------------------------------------------------
 
     // POST /api/purchases (Vevő megveszi az autót)
@@ -213,27 +269,68 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 400, { error: 'car_id, buyer_name és buyer_email kötelező!' });
       }
 
-      const car = db.prepare('SELECT * FROM cars WHERE id = ?').get(Number(car_id));
+      const car = db.prepare('SELECT * FROM auto WHERE id = ?').get(Number(car_id));
       if (!car) {
         return sendJson(res, 404, { error: 'A megvásárolni kívánt autó nem található!' });
       }
 
-      const stmt = db.prepare(`
-        INSERT INTO purchases (car_id, car_title, buyer_name, buyer_email, price)
-        VALUES (?, ?, ?, ?, ?)
-      `);
-      const result = stmt.run(car.id, `${car.brand} ${car.model}`, buyer_name, buyer_email, car.price);
+      // Ellenőrizzük, hogy már el van-e adva
+      const alreadyBought = db.prepare('SELECT id FROM vasarlas WHERE auto_id = ?').get(car.id);
+      if (alreadyBought) {
+        return sendJson(res, 400, { error: 'Ez az autó már el lett adva!' });
+      }
+
+      // Vevő keresése vagy létrehozása
+      let vevo = db.prepare('SELECT id FROM vevo WHERE nev = ?').get(buyer_name);
+      let vevoId;
+      if (vevo) {
+        vevoId = vevo.id;
+      } else {
+        const insVevo = db.prepare(`
+          INSERT INTO vevo (felhasznalo_id, nev, telepules_id, lakcim, telefon)
+          VALUES (NULL, ?, 1, 'Cím megadása folyamatban', NULL)
+        `).run(buyer_name);
+        vevoId = Number(insVevo.lastInsertRowid);
+      }
+
+      // Vásárlás rögzítése
+      const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
+      const insVasarlas = db.prepare(`
+        INSERT INTO vasarlas (auto_id, vevo_id, ar, datum)
+        VALUES (?, ?, ?, ?)
+      `).run(car.id, vevoId, car.ar, now);
+
+      const vasarlasId = Number(insVasarlas.lastInsertRowid);
+
+      // Automatikus számla generálása a számlafej és számlatétel táblákba
+      const szamlaszam = `AT-${new Date().getFullYear()}/${String(vasarlasId).padStart(4, '0')}`;
+      const today = now.substring(0, 10);
+      const insSzamla = db.prepare(`
+        INSERT INTO szamlafej (
+          szamlaszam, vasarlas_id, fizetesmod_id, datum_telj,
+          datum_szamla, datum_fizhat, datum_fizetve, megjegyzes
+        ) VALUES (?, ?, 1, ?, ?, ?, ?, ?)
+      `).run(szamlaszam, vasarlasId, today, today, today, today, 'Online autóvásárlás');
+
+      const szamlaId = Number(insSzamla.lastInsertRowid);
+
+      // Számlatétel rögzítése
+      db.prepare(`
+        INSERT INTO szamlatetel (szamla_id, sorszam, auto_id, megnevezes, mennyiseg, egysegar, afakulcs_id)
+        VALUES (?, 1, ?, 'Gépjármű adásvétel', 1, ?, 1)
+      `).run(szamlaId, car.id, Math.round(car.ar / 1.27));
 
       return sendJson(res, 201, {
-        id: result.lastInsertRowid,
-        message: 'Sikeres vásárlás! A megrendelést rögzítettük.',
+        id: vasarlasId,
+        szamlaszam,
+        message: 'Sikeres vásárlás! A megrendelést és a számlát rögzítettük az adatbázisban.',
         purchase: {
-          id: result.lastInsertRowid,
+          id: vasarlasId,
           car_id: car.id,
-          car_title: `${car.brand} ${car.model}`,
           buyer_name,
           buyer_email,
-          price: car.price
+          price: car.ar,
+          created_at: now
         }
       });
     }
@@ -248,7 +345,7 @@ const server = http.createServer(async (req, res) => {
     // 3. USERS & AUTH (Felhasználók és Szerepkörök)
     // -------------------------------------------------------------
 
-    // GET /api/users (Admin lekérdezheti a felhasználókat)
+    // GET /api/users
     if (req.method === 'GET' && pathname === '/api/users') {
       const role = url.searchParams.get('role');
       let query = 'SELECT id, name, email, role FROM users';
@@ -262,7 +359,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, stmt.all(...params));
     }
 
-    // POST /api/users/login (Egyszerű bejelentkezés)
+    // POST /api/users/login
     if (req.method === 'POST' && pathname === '/api/users/login') {
       const body = await parseBody(req);
       const { email, role } = body;
@@ -281,7 +378,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { message: 'Sikeres bejelentkezés', user });
     }
 
-    // DELETE /api/users/:id (Admin törölhet felhasználót, kivéve magát)
+    // DELETE /api/users/:id
     const userIdMatch = pathname.match(/^\/api\/users\/(\d+)$/);
     if (req.method === 'DELETE' && userIdMatch) {
       const id = Number(userIdMatch[1]);
@@ -292,12 +389,12 @@ const server = http.createServer(async (req, res) => {
       if (user.role === 'admin' && user.email === 'admin@autotrade.hu') {
         return sendJson(res, 400, { error: 'A fő adminisztrátort nem lehet törölni!' });
       }
-      db.prepare('DELETE FROM users WHERE id = ?').run(id);
+      db.prepare('DELETE FROM felhasznalo WHERE id = ?').run(id);
       return sendJson(res, 200, { message: 'Felhasználó törölve' });
     }
 
     // -------------------------------------------------------------
-    // 4. METADATA & STATS (Kategóriák, Kereskedők, Éves bevétel)
+    // 4. METADATA & STATS (Kategóriák, Kereskedők, Statisztikák)
     // -------------------------------------------------------------
 
     // GET /api/categories
@@ -312,21 +409,21 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, stmt.all());
     }
 
-    // GET /api/stats (Adminisztrátor éves bevétel és statisztikák)
+    // GET /api/stats
     if (req.method === 'GET' && pathname === '/api/stats') {
       const carStats = db.prepare(`
         SELECT
           COUNT(*) as total_cars,
-          SUM(price) as total_inventory_value,
-          AVG(price) as avg_price
-        FROM cars
+          SUM(ar) as total_inventory_value,
+          AVG(ar) as avg_price
+        FROM auto
       `).get();
 
       const purchaseStats = db.prepare(`
         SELECT
           COUNT(*) as total_sales_count,
-          COALESCE(SUM(price), 0) as total_revenue
-        FROM purchases
+          COALESCE(SUM(ar), 0) as total_revenue
+        FROM vasarlas
       `).get();
 
       return sendJson(res, 200, {
@@ -334,6 +431,22 @@ const server = http.createServer(async (req, res) => {
         purchases: purchaseStats,
         generated_at: new Date().toISOString()
       });
+    }
+
+    // -------------------------------------------------------------
+    // 5. NORMALIZÁLT TÁBLÁK KÖZVETLEN VÉGPONTJAI
+    // -------------------------------------------------------------
+    const normalizedTables = [
+      'marka', 'modell', 'kategoria', 'uzemanyag', 'valto', 'szin', 'allapot',
+      'telepules', 'kereskedes', 'szerepkor', 'felhasznalo', 'vevo', 'auto',
+      'vasarlas', 'fizetesmod', 'afakulcs', 'szamlafej', 'szamlatetel'
+    ];
+
+    for (const tbl of normalizedTables) {
+      if (req.method === 'GET' && pathname === `/api/${tbl}`) {
+        const rows = db.prepare(`SELECT * FROM ${tbl}`).all();
+        return sendJson(res, 200, rows);
+      }
     }
 
     sendJson(res, 404, { error: 'Végpont nem található' });
